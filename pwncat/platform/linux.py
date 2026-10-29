@@ -656,28 +656,36 @@ class Linux(Platform):
         # Always running (cheap: one wakeup per second, no I/O unless a
         # tick is due) so `set -g keepalive N` takes effect on this live
         # session instead of only on the next connection.
-        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True
+        )
+        self._heartbeat_thread.start()
 
     def _heartbeat_loop(self):
         """Poll the `keepalive` config every second and, once that many
         seconds have passed since the last tick, call `_heartbeat_tick` to
         keep NAT/proxy connection tracking (e.g. ngrok) from dropping an
-        idle session. Stops as soon as the channel is known disconnected."""
+        idle session. Stops as soon as the channel is known disconnected
+        or on any unexpected error, rather than dying silently."""
 
         last_tick = time.monotonic()
         while not self._heartbeat_stop.wait(1):
-            if not self.channel.connected:
+            try:
+                if not self.channel.connected:
+                    return
+
+                interval = self.session.config.get("keepalive", 0)
+                if interval <= 0:
+                    last_tick = time.monotonic()
+                    continue
+
+                now = time.monotonic()
+                if now - last_tick >= interval:
+                    self._heartbeat_tick()
+                    last_tick = now
+            except Exception:
+                self._heartbeat_stop.set()
                 return
-
-            interval = self.session.config.get("keepalive", 0)
-            if interval <= 0:
-                last_tick = time.monotonic()
-                continue
-
-            now = time.monotonic()
-            if now - last_tick >= interval:
-                self._heartbeat_tick()
-                last_tick = now
 
     def _heartbeat_tick(self):
         """Send a single no-op byte, unless a command is running, the
@@ -712,7 +720,11 @@ class Linux(Platform):
     def exit(self):
         """Exit this session"""
 
+        # Joined (bounded) before the caller closes the channel, so the
+        # heartbeat thread can't be mid-send() on an fd that's about to
+        # close out from under it.
         self._heartbeat_stop.set()
+        self._heartbeat_thread.join(timeout=2)
         self.channel.send(b"exit\n")
 
     def disable_history(self):

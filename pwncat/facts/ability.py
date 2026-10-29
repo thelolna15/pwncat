@@ -7,6 +7,7 @@ from GTFOBins methods simpler, since they are used in multiple places within
 pwncat.
 """
 import functools
+import contextlib
 import subprocess
 from io import TextIOWrapper
 from typing import IO, Union, Callable, Optional
@@ -442,8 +443,14 @@ class GTFOExecute(ExecuteAbility):
         )
 
         # Locked as one unit: a keepalive tick landing between the payload
-        # and its trigger input would corrupt this exchange.
-        with session.platform._command_lock:
+        # and its trigger input would corrupt this exchange. Only Linux
+        # has a keepalive heartbeat (and so this lock) to race against;
+        # fall back to a no-op for any other platform this agnostic
+        # module might someday run against.
+        lock = (
+            getattr(session.platform, "_command_lock", None) or contextlib.nullcontext()
+        )
+        with lock:
             # Send the payload
             session.platform.channel.send(payload.encode("utf-8") + b"\n")
 
