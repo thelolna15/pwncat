@@ -8,6 +8,10 @@ The Changelog starts with v0.4.1, because we did not keep one before that,
 and simply didn't have the time to go back and retroactively create one.
 
 ## [Unreleased]
+### Added
+- Added an opt-in `keepalive` config value (seconds, default `0`/off): while idle, the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
+- SSH channel now enables paramiko's protocol-level transport keepalive (fixed 30s interval), the same fix `ssh -o ServerAliveInterval` gives you
+
 ### Fixed
 - Fixed `pwncat.platform` failing to import on Python builds without `readline` (e.g. musl-based), even for Linux-only sessions
 - Fixed a near-deterministic hang writing/reading binary file content containing `0x13` (Ctrl-S/XOFF): pty software flow control wasn't disabled, so that byte paused the shell's output indefinitely

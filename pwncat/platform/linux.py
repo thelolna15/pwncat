@@ -10,6 +10,7 @@ Popen can be running at a time. It is imperative that you call
 ``Popen.wait`` or wait for ``Popen.poll`` to return non-Null prior
 to calling any other pwncat methods.
 """
+
 import os
 import stat
 import time
@@ -18,6 +19,7 @@ import shutil
 import hashlib
 import pathlib
 import tempfile
+import threading
 import subprocess
 from io import TextIOWrapper, BufferedIOBase, UnsupportedOperation
 from typing import List, Union, BinaryIO, Optional, Generator
@@ -228,7 +230,7 @@ class PopenLinux(pwncat.subprocess.Popen):
             return
 
         # Terminate the process (SIGQUIT)
-        self.platform.channel.send(b"\x1C\x1C")
+        self.platform.channel.send(b"\x1c\x1c")
         self.returncode = -1
         self.platform.command_running = None
 
@@ -567,6 +569,11 @@ class Linux(Platform):
         self.name = "linux"
         self.command_running = None
 
+        # Guards every command-start send, including the keepalive
+        # heartbeat below, so the two can't interleave bytes on the channel.
+        self._command_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+
         self._id = None
 
         # This causes an stty to be sent.
@@ -637,9 +644,36 @@ class Linux(Platform):
 
         self.refresh_uid()
 
+        keepalive = self.session.config.get("keepalive", 0)
+        if keepalive > 0:
+            threading.Thread(
+                target=self._heartbeat_loop, args=(keepalive,), daemon=True
+            ).start()
+
+    def _heartbeat_loop(self, interval: float):
+        """Call ``_heartbeat_tick`` every ``interval`` seconds until the
+        session exits, to keep NAT/proxy connection tracking (e.g. ngrok)
+        from dropping an idle session."""
+
+        while not self._heartbeat_stop.wait(interval):
+            self._heartbeat_tick()
+
+    def _heartbeat_tick(self):
+        """Send a single no-op byte, unless a command is running or the
+        session is live-interactive, since those own the channel's bytes."""
+
+        with self._command_lock:
+            if self.command_running is not None or self._interactive:
+                return
+            try:
+                self.channel.send(b"\n")
+            except Exception:
+                self._heartbeat_stop.set()
+
     def exit(self):
         """Exit this session"""
 
+        self._heartbeat_stop.set()
         self.channel.send(b"exit\n")
 
     def disable_history(self):
@@ -1121,94 +1155,97 @@ class Linux(Platform):
         else:
             raise ValueError("expected a command string or list of arguments")
 
-        if self.command_running is not None:
-            raise PlatformError(
-                f"attempting to run {repr(command)} during execution of {self.command_running.args}!"
-            )
-
-        # This breaks `euid` situations. Not all shells support -p, so I think just not
-        # using this is a better option. I'm leaving it here just in case removing it
-        # causes problems in the future. Tests seem positive so far.
-        # if shell:
-        #     # Ensure this works normally
-        #     command = shlex.join(["/bin/sh", "-c", command])
-
-        if cwd is not None:
-            command = f"(cd {cwd} && {command})"
-
-        if env is not None:
-            command = (
-                " ".join(
-                    [
-                        f"{util.quote(name)}={util.quote(value)}"
-                        for name, value in env.items()
-                    ]
+        # Held through the check-send-mark sequence below so the keepalive
+        # heartbeat can never inject a byte into an in-flight command.
+        with self._command_lock:
+            if self.command_running is not None:
+                raise PlatformError(
+                    f"attempting to run {repr(command)} during execution of {self.command_running.args}!"
                 )
-                + " "
-                + command
+
+            # This breaks `euid` situations. Not all shells support -p, so I think just not
+            # using this is a better option. I'm leaving it here just in case removing it
+            # causes problems in the future. Tests seem positive so far.
+            # if shell:
+            #     # Ensure this works normally
+            #     command = shlex.join(["/bin/sh", "-c", command])
+
+            if cwd is not None:
+                command = f"(cd {cwd} && {command})"
+
+            if env is not None:
+                command = (
+                    " ".join(
+                        [
+                            f"{util.quote(name)}={util.quote(value)}"
+                            for name, value in env.items()
+                        ]
+                    )
+                    + " "
+                    + command
+                )
+
+            if isinstance(stdout, str):
+                command += f" >{stdout}"
+            elif stdout == pwncat.subprocess.DEVNULL:
+                command += " >/dev/null"
+
+            if isinstance(stderr, str):
+                command += f" 2>{stderr}"
+            elif stderr == pwncat.subprocess.DEVNULL:
+                command += " 2>/dev/null"
+
+            if isinstance(stdin, str):
+                command += f" 0<{stdin}"
+            elif stdin == pwncat.subprocess.DEVNULL:
+                command += " 0</dev/null"
+            elif stdin != pwncat.subprocess.PIPE:
+                # if a process requests stdin but we aren't expecting it
+                # things can get wonky. We prevent that by kill stdin unless
+                # explicitly asked for.
+                command += " 0</dev/null"
+
+            # Generate delimeters
+            start_delim = util.random_string(10)
+            end_delim = util.random_string(10)
+            code_delim = util.random_string(10)
+
+            commands = []
+            commands.append(" export PS1=")
+            commands.append(
+                f"echo; echo {start_delim}; {command}; R=$?; echo {end_delim}; echo $R; echo {code_delim}"
             )
 
-        if isinstance(stdout, str):
-            command += f" >{stdout}"
-        elif stdout == pwncat.subprocess.DEVNULL:
-            command += " >/dev/null"
+            # Build the final command
+            command = ";".join(commands).encode("utf-8")
 
-        if isinstance(stderr, str):
-            command += f" 2>{stderr}"
-        elif stderr == pwncat.subprocess.DEVNULL:
-            command += " 2>/dev/null"
+            # Send the command
+            if send_command is None:
+                self.channel.send(command + b"\n")
+            else:
+                send_command(command + b"\n")
 
-        if isinstance(stdin, str):
-            command += f" 0<{stdin}"
-        elif stdin == pwncat.subprocess.DEVNULL:
-            command += " 0</dev/null"
-        elif stdin != pwncat.subprocess.PIPE:
-            # if a process requests stdin but we aren't expecting it
-            # things can get wonky. We prevent that by kill stdin unless
-            # explicitly asked for.
-            command += " 0</dev/null"
+            # Send bootstraping input if provided
+            if bootstrap_input is not None:
+                self.channel.send(bootstrap_input)
 
-        # Generate delimeters
-        start_delim = util.random_string(10)
-        end_delim = util.random_string(10)
-        code_delim = util.random_string(10)
+            # Log the command
+            self.logger.info(command.decode("utf-8"))
 
-        commands = []
-        commands.append(" export PS1=")
-        commands.append(
-            f"echo; echo {start_delim}; {command}; R=$?; echo {end_delim}; echo $R; echo {code_delim}"
-        )
-
-        # Build the final command
-        command = ";".join(commands).encode("utf-8")
-
-        # Send the command
-        if send_command is None:
-            self.channel.send(command + b"\n")
-        else:
-            send_command(command + b"\n")
-
-        # Send bootstraping input if provided
-        if bootstrap_input is not None:
-            self.channel.send(bootstrap_input)
-
-        # Log the command
-        self.logger.info(command.decode("utf-8"))
-
-        popen = PopenLinux(
-            self,
-            args,
-            stdout,
-            stdin,
-            text,
-            encoding,
-            errors,
-            bufsize,
-            start_delim.encode("utf-8") + b"\n",
-            end_delim.encode("utf-8") + b"\n",
-            code_delim.encode("utf-8") + b"\n",
-        )
-        self.command_running = popen
+            popen = PopenLinux(
+                self,
+                args,
+                stdout,
+                stdin,
+                text,
+                encoding,
+                errors,
+                bufsize,
+                start_delim.encode("utf-8") + b"\n",
+                end_delim.encode("utf-8") + b"\n",
+                code_delim.encode("utf-8") + b"\n",
+            )
+            self.command_running = popen
 
         return popen
 

@@ -8,6 +8,9 @@ testpaths = [
     "tests",
 ]
 addopts = "-v"
+markers = [
+    "manager_config(args): kwargs passed to Manager() by the session/linux/windows fixtures",
+]
 
 [tool.poetry]
 name = "pwncat-cs"
