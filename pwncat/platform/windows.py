@@ -33,10 +33,8 @@ from subprocess import TimeoutExpired, CalledProcessError
 from dataclasses import dataclass
 
 try:
-    # Only used for its side effect of adding line editing to input().
-    # Not available on every platform/build (e.g. musl, some minimal
-    # Python builds), and this module is imported even for Linux-only
-    # sessions, so it must not be required.
+    # Only wanted for its line-editing side effect on input(); not
+    # available on every build (e.g. musl), including for Linux-only sessions.
     import readline  # noqa: F401
 except ImportError:
     pass

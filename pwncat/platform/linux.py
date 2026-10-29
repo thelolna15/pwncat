@@ -723,8 +723,7 @@ class Linux(Platform):
         ).wait()
 
         # The raw restore above re-enables ixon (its iflag word is 0x400),
-        # undoing the interactive-setter's flow-control fix for any session
-        # that needed a pty spawned here rather than already having one.
+        # undoing the flow-control fix from the interactive setter.
         self.Popen(
             ["stty", "-ixon", "-ixoff"],
             stdin=subprocess.PIPE,
@@ -1677,9 +1676,8 @@ class Linux(Platform):
             return
 
         if not value:
-            # -ixon/-ixoff: without this, a 0x13 (Ctrl-S/XOFF) byte in
-            # written file content pauses the pty's output indefinitely;
-            # lnext-escaping it isn't enough to suppress flow control.
+            # -ixon/-ixoff: a 0x13 (Ctrl-S/XOFF) byte in file content
+            # otherwise pauses the pty's output; lnext-escaping it isn't enough.
             command = (
                 " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
                 + "\n"
