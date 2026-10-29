@@ -722,6 +722,15 @@ class Linux(Platform):
             stdout=subprocess.PIPE,
         ).wait()
 
+        # The raw restore above re-enables ixon (its iflag word is 0x400),
+        # undoing the interactive-setter's flow-control fix for any session
+        # that needed a pty spawned here rather than already having one.
+        self.Popen(
+            ["stty", "-ixon", "-ixoff"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        ).wait()
+
     def get_host_hash(self) -> str:
         """
         Retrieve a string which uniquely identifies this victim host. On Unix-like
