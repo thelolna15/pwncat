@@ -219,24 +219,21 @@ class PopenLinux(pwncat.subprocess.Popen):
         if self.returncode is not None:
             return
 
-        # Locked so a heartbeat tick can't slip a byte in between the
-        # signal and clearing command_running.
-        with self.platform._command_lock:
-            # Kill the process (SIGINT)
-            self.platform.channel.send(util.CTRL_C * 2)
-            self.returncode = -1
-            self.platform.command_running = None
+        # channel.send() is atomic on its own (see Channel.send); no
+        # platform lock here so a stuck keepalive heartbeat can never
+        # block the one thing meant to recover from a hung command.
+        self.platform.channel.send(util.CTRL_C * 2)
+        self.returncode = -1
+        self.platform.command_running = None
 
     def terminate(self):
 
         if self.returncode is not None:
             return
 
-        with self.platform._command_lock:
-            # Terminate the process (SIGQUIT)
-            self.platform.channel.send(b"\x1c\x1c")
-            self.returncode = -1
-            self.platform.command_running = None
+        self.platform.channel.send(b"\x1c\x1c")
+        self.returncode = -1
+        self.platform.command_running = None
 
     def _receive_returncode(self):
         """All output has been read of the stream, now we read
@@ -573,13 +570,14 @@ class Linux(Platform):
         self.name = "linux"
         self.command_running = None
 
-        # Guards raw channel writes that happen while command_running is
-        # still None (command start, exit, pty setup, interactive
-        # transitions, kill/terminate) against the keepalive heartbeat
-        # below. Writes made *during* an active Popen (su/sudo prompts,
-        # LinuxWriter/LinuxReader, its own EOF bytes) don't need it: the
-        # heartbeat already skips while command_running is set, for as
-        # long as that stays true for the whole exchange.
+        # Channel.send() is already atomic per call (see pwncat.channel),
+        # which is enough for every one-shot send in this file. This lock
+        # instead guards command_running/_interactive *state transitions*
+        # that span several sends/reads as one logical unit (Popen's
+        # check-send-mark, get_pty(), the interactive setter) against the
+        # keepalive heartbeat below, which checks that same state before
+        # ticking. kill()/terminate()/exit() don't need it: a stray
+        # heartbeat byte next to a single already-atomic send is harmless.
         # Reentrant: get_pty() nests into the interactive setter, which
         # nests into Popen() via getenv().
         self._command_lock = threading.RLock()
@@ -715,8 +713,7 @@ class Linux(Platform):
         """Exit this session"""
 
         self._heartbeat_stop.set()
-        with self._command_lock:
-            self.channel.send(b"exit\n")
+        self.channel.send(b"exit\n")
 
     def disable_history(self):
         """Disable shell history"""

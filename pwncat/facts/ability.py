@@ -441,11 +441,14 @@ class GTFOExecute(ExecuteAbility):
             gtfo=session.platform.gtfo, shell=full_command, **self.kwargs
         )
 
-        # Send the payload
-        session.platform.channel.send(payload.encode("utf-8") + b"\n")
+        # Locked as one unit: a keepalive tick landing between the payload
+        # and its trigger input would corrupt this exchange.
+        with session.platform._command_lock:
+            # Send the payload
+            session.platform.channel.send(payload.encode("utf-8") + b"\n")
 
-        # Send the input needed to trigger execution
-        session.platform.channel.send(input_data)
+            # Send the input needed to trigger execution
+            session.platform.channel.send(input_data)
 
         return lambda session: session.platform.channel.send(
             exit_cmd.encode("utf-8") + b"\n"

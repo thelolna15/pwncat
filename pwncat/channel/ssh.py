@@ -85,7 +85,7 @@ class Ssh(Channel):
         self._connected = False
         self.client.close()
 
-    def send(self, data: bytes):
+    def _send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call
         that only returns after all data is sent."""
 

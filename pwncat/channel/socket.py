@@ -94,7 +94,7 @@ class Socket(Channel):
         fcntl.fcntl(self.client, fcntl.F_SETFL, os.O_NONBLOCK)
 
     @connect_required
-    def send(self, data: bytes):
+    def _send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call
         that only returns after all data is sent."""
 
