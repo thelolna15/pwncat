@@ -6,6 +6,7 @@ shell and grabs a PTY. It then wraps the SSH channel in a pwncat channel.
 This module requires a host, user and either a password or identity (key) file.
 An optional port argument is also accepted.
 """
+
 import os
 import socket
 from typing import Union, TextIO, Optional
@@ -58,6 +59,10 @@ class Ssh(Channel):
                 allow_agent=True,
                 look_for_keys=False,
             )
+
+            # Protocol-level no-op packets; keeps NAT/firewall connection
+            # tracking alive on idle sessions, same idea as ServerAliveInterval.
+            client.get_transport().set_keepalive(30)
 
             columns, rows = os.get_terminal_size(0)
             shell = client.invoke_shell(width=columns, height=rows)
