@@ -89,7 +89,11 @@ class Ssh(Channel):
         """Send data to the remote shell. This is a blocking call
         that only returns after all data is sent."""
 
-        self.client.sendall(data)
+        try:
+            self.client.sendall(data)
+        except (OSError, paramiko.SSHException) as exc:
+            self._connected = False
+            raise ChannelClosed(self) from exc
 
         return len(data)
 

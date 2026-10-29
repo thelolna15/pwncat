@@ -105,7 +105,8 @@ class Socket(Channel):
                     written += self.client.send(data[written:])
                 except (BlockingIOError, ssl.SSLWantWriteError, ssl.SSLWantReadError):
                     pass
-        except BrokenPipeError as exc:
+        except ConnectionError as exc:
+            # Covers BrokenPipeError, ConnectionResetError, etc.
             self._connected = False
             raise ChannelClosed(self) from exc
         except (ssl.SSLEOFError, ssl.SSLSyscallError, ssl.SSLZeroReturnError) as exc:

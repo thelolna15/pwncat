@@ -683,7 +683,10 @@ class Linux(Platform):
                 if now - last_tick >= interval:
                     self._heartbeat_tick()
                     last_tick = now
-            except Exception:
+            except Exception as exc:
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
+                )
                 self._heartbeat_stop.set()
                 return
 
