@@ -14,6 +14,8 @@ and simply didn't have the time to go back and retroactively create one.
 - Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
 
 ### Fixed
+- Fixed `Channel.send()` across every channel type not being safe to call from more than one thread at a time (needed for the new `keepalive` heartbeat above, but closes the same gap for any other code sending to the channel concurrently)
+- Fixed `GTFOExecute.shell()` (used by `escalate`) being able to have its GTFOBins payload and trigger-input sends interleaved with unrelated channel traffic
 - Fixed `pwncat.platform` failing to import on Python builds without `readline` (e.g. musl-based), even for Linux-only sessions
 - Fixed a near-deterministic hang writing/reading binary file content containing `0x13` (Ctrl-S/XOFF): pty software flow control wasn't disabled, so that byte paused the shell's output indefinitely
 - Fixed `Manager` crashing on startup for any db URI (including the default `memory://`) because `zodburi`'s `pkg_resources`-based lookup can't resolve `zope.interface` on current pip installs

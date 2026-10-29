@@ -294,9 +294,8 @@ class Channel(ABC):
 
         # Serializes every send() across whatever's calling it (commands,
         # modules, platform code, a background keepalive thread, ...) so
-        # two callers can never interleave bytes on the wire. Reentrant:
-        # sendline() calls send() on the same thread.
-        self._write_lock = threading.RLock()
+        # two callers can never interleave bytes on the wire.
+        self._write_lock = threading.Lock()
 
     @property
     @abstractmethod

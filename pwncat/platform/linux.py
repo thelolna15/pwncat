@@ -709,20 +709,34 @@ class Linux(Platform):
                 # congested) link, this feature's actual target, sends
                 # instantly.
                 self.channel.send(b"\n")
-            except Exception as exc:
+            except pwncat.channel.ChannelClosed as exc:
+                # The channel itself says it's dead; no point retrying.
                 self.session.log(
                     f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
                 )
                 self._heartbeat_stop.set()
+            except Exception as exc:
+                # Anything else might be transient (a blip, not a dead
+                # channel); warn once and let the next tick try again
+                # rather than disabling keepalive for the rest of the
+                # session over a single hiccup.
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat send failed: {exc}"
+                )
         finally:
             self._command_lock.release()
 
     def exit(self):
         """Exit this session"""
 
-        # Joined (bounded) before the caller closes the channel, so the
-        # heartbeat thread can't be mid-send() on an fd that's about to
-        # close out from under it.
+        # Joined before the caller closes the channel, so the heartbeat
+        # thread can't be mid-send() on an fd that's about to close out
+        # from under it. The 2s timeout covers the thread just sleeping;
+        # it doesn't bound this method overall -- same shortcut as
+        # _heartbeat_tick's send() -- if the thread is genuinely stuck
+        # inside a stalled send(), the join times out and the exit\n send
+        # right below then queues up behind the same still-held channel
+        # write lock.
         self._heartbeat_stop.set()
         self._heartbeat_thread.join(timeout=2)
         self.channel.send(b"exit\n")

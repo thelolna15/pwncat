@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+import pwncat.channel
+
 
 def test_keepalive_disabled_by_default(session):
     """No config, no session marker -- the default must be off."""
@@ -47,6 +49,44 @@ def test_heartbeat_tick_sends_while_idle(linux):
     linux.platform._heartbeat_tick()
 
     assert sent == [b"\n"]
+
+
+def test_heartbeat_tick_survives_transient_send_error(linux):
+    """A non-fatal send error (not ChannelClosed) must not permanently
+    disable the heartbeat -- the whole point is surviving a flaky link."""
+
+    real_send = linux.platform.channel.send
+
+    def boom(data):
+        raise OSError("transient blip")
+
+    linux.platform.channel.send = boom
+
+    linux.platform._heartbeat_tick()
+
+    assert not linux.platform._heartbeat_stop.is_set()
+
+    # Restore before teardown sends its own exit\n.
+    linux.platform.channel.send = real_send
+
+
+def test_heartbeat_tick_stops_on_channel_closed(linux):
+    """A ChannelClosed means the channel really is dead; the heartbeat
+    should give up instead of retrying forever."""
+
+    real_send = linux.platform.channel.send
+
+    def boom(data):
+        raise pwncat.channel.ChannelClosed(linux.platform.channel)
+
+    linux.platform.channel.send = boom
+
+    linux.platform._heartbeat_tick()
+
+    assert linux.platform._heartbeat_stop.is_set()
+
+    # Restore before teardown sends its own exit\n.
+    linux.platform.channel.send = real_send
 
 
 def test_heartbeat_live_reconfigure(linux):

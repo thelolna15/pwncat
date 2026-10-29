@@ -457,6 +457,11 @@ class GTFOExecute(ExecuteAbility):
             # Send the input needed to trigger execution
             session.platform.channel.send(input_data)
 
+        # shortcut: the lock above ends here, but the caller's brief
+        # settling pause before marking the new shell busy/interactive is
+        # not covered. A heartbeat tick landing in that gap only sends a
+        # blank line (harmless to a shell prompt), not another payload
+        # byte, so this is lower-risk than the exchange above.
         return lambda session: session.platform.channel.send(
             exit_cmd.encode("utf-8") + b"\n"
         )
