@@ -9,6 +9,7 @@ and simply didn't have the time to go back and retroactively create one.
 
 ## [Unreleased]
 ### Fixed
+- Fixed a near-deterministic hang writing/reading binary file content containing `0x13` (Ctrl-S/XOFF): pty software flow control wasn't disabled, so that byte paused the shell's output indefinitely
 - Fixed `Manager` crashing on startup for any db URI (including the default `memory://`) because `zodburi`'s `pkg_resources`-based lookup can't resolve `zope.interface` on current pip installs
 - Fixed `enumerate.system.uname` crashing on kernel release strings with a non-numeric suffix glued onto the patch number (e.g. Kali's `6.18.12+kali-amd64`)
 - Fixed `shlex.join` use with non-str type objects (e.g. `RemotePath`)

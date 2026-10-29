@@ -1668,7 +1668,13 @@ class Linux(Platform):
             return
 
         if not value:
-            command = " ; ".join([" stty -echo nl lnext ^V", "export PS1="]) + "\n"
+            # -ixon/-ixoff: without this, a 0x13 (Ctrl-S/XOFF) byte in
+            # written file content pauses the pty's output indefinitely;
+            # lnext-escaping it isn't enough to suppress flow control.
+            command = (
+                " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
+                + "\n"
+            )
             self.logger.info(command.rstrip("\n"))
             self.channel.send(command.encode("utf-8"))
             self.channel.drain()
