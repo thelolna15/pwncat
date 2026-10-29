@@ -24,7 +24,6 @@ import hashlib
 import pathlib
 import tarfile
 import binascii
-import readline  # noqa: F401
 import functools
 import threading
 import subprocess
@@ -32,6 +31,15 @@ from io import BytesIO, RawIOBase, TextIOWrapper
 from typing import List, Union, BinaryIO, Optional
 from subprocess import TimeoutExpired, CalledProcessError
 from dataclasses import dataclass
+
+try:
+    # Only used for its side effect of adding line editing to input().
+    # Not available on every platform/build (e.g. musl, some minimal
+    # Python builds), and this module is imported even for Linux-only
+    # sessions, so it must not be required.
+    import readline  # noqa: F401
+except ImportError:
+    pass
 
 import requests
 
