@@ -14,6 +14,7 @@ Before any structural exploration of this codebase, verify the `codebase-memory`
 - Before merging anything into `master`, run `/humanizer:humanizer` and `/antislop` over any new prose, comments, or docs to strip AI-slop phrasing.
 - Write all code, comments, commit messages, and PR descriptions in English (existing project convention).
 - Add a one-line entry to `CHANGELOG.md` under `[Unreleased]` for every user-facing change (existing CONTRIBUTING.md rule); tag bug-fix PRs with `Fixes #XXX` only if the fix is complete.
+- Pushing to the remote is the user's call, not the agent's. Commit and merge locally as described above, but don't push, and don't bring pushing up — leave it to the user to push whenever they decide to.
 
 ## Commands
 
