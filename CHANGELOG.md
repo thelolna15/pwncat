@@ -9,8 +9,9 @@ and simply didn't have the time to go back and retroactively create one.
 
 ## [Unreleased]
 ### Added
-- Added an opt-in `keepalive` config value (seconds, default `0`/off): while idle, the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
+- Added an opt-in `keepalive` config value (seconds, default `0`/off, live-reconfigurable): while idle, the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
 - SSH channel now enables paramiko's protocol-level transport keepalive (fixed 30s interval), the same fix `ssh -o ServerAliveInterval` gives you
+- Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
 
 ### Fixed
 - Fixed `pwncat.platform` failing to import on Python builds without `readline` (e.g. musl-based), even for Linux-only sessions
@@ -19,9 +20,6 @@ and simply didn't have the time to go back and retroactively create one.
 - Fixed `enumerate.system.uname` crashing on kernel release strings with a non-numeric suffix glued onto the patch number (e.g. Kali's `6.18.12+kali-amd64`)
 - Fixed `shlex.join` use with non-str type objects (e.g. `RemotePath`)
 - Fixed `set` command use with incorrect keys (e.g. `set invalid value`)
-
-### Added
-- Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
 
 ## [0.5.4] - 2022-01-27
 Bug fix for the `load` command.

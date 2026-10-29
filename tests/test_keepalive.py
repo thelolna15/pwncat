@@ -49,6 +49,26 @@ def test_heartbeat_tick_sends_while_idle(linux):
     assert sent == [b"\n"]
 
 
+def test_heartbeat_live_reconfigure(linux):
+    """Enabling keepalive on an already-connected session (not just at
+    connect time) must take effect, since the poll loop re-reads the
+    config every second rather than only once at startup."""
+
+    sent = []
+    real_send = linux.platform.channel.send
+
+    def spy_send(data):
+        sent.append(data)
+        return real_send(data)
+
+    linux.platform.channel.send = spy_send
+    linux.config.set("keepalive", "1", glob=True)
+
+    time.sleep(2.5)
+
+    assert len(sent) >= 1
+
+
 @pytest.mark.manager_config(
     args={"config": io.StringIO('set -g db "memory://"\nset -g keepalive 1\n')}
 )

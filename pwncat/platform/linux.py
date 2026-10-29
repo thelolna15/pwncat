@@ -651,25 +651,42 @@ class Linux(Platform):
 
         self.refresh_uid()
 
-        keepalive = self.session.config.get("keepalive", 0)
-        if keepalive > 0:
-            threading.Thread(
-                target=self._heartbeat_loop, args=(keepalive,), daemon=True
-            ).start()
+        # Always running (cheap: one wakeup per second, no I/O unless a
+        # tick is due) so `set -g keepalive N` takes effect on this live
+        # session instead of only on the next connection.
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
-    def _heartbeat_loop(self, interval: float):
-        """Call ``_heartbeat_tick`` every ``interval`` seconds until the
-        session exits, to keep NAT/proxy connection tracking (e.g. ngrok)
-        from dropping an idle session."""
+    def _heartbeat_loop(self):
+        """Poll the `keepalive` config every second and, once that many
+        seconds have passed since the last tick, call `_heartbeat_tick` to
+        keep NAT/proxy connection tracking (e.g. ngrok) from dropping an
+        idle session. Stops as soon as the channel is known disconnected."""
 
-        while not self._heartbeat_stop.wait(interval):
-            self._heartbeat_tick()
+        last_tick = time.monotonic()
+        while not self._heartbeat_stop.wait(1):
+            if not self.channel.connected:
+                return
+
+            interval = self.session.config.get("keepalive", 0)
+            if interval <= 0:
+                last_tick = time.monotonic()
+                continue
+
+            now = time.monotonic()
+            if now - last_tick >= interval:
+                self._heartbeat_tick()
+                last_tick = now
 
     def _heartbeat_tick(self):
-        """Send a single no-op byte, unless a command is running or the
-        session is live-interactive, since those own the channel's bytes."""
+        """Send a single no-op byte, unless a command is running, the
+        session is live-interactive, or the channel is already busy with
+        one of those -- those own the channel's bytes, and skipping here
+        (rather than blocking for a turn) keeps a stalled channel.send()
+        from stalling every other channel operation behind this lock."""
 
-        with self._command_lock:
+        if not self._command_lock.acquire(blocking=False):
+            return
+        try:
             if self.command_running is not None or self._interactive:
                 return
             try:
@@ -679,6 +696,8 @@ class Linux(Platform):
                     f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
                 )
                 self._heartbeat_stop.set()
+        finally:
+            self._command_lock.release()
 
     def exit(self):
         """Exit this session"""
