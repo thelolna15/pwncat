@@ -753,6 +753,9 @@ class Linux(Platform):
         self._heartbeat_thread.join(timeout=2)
         self.channel.send(b"exit\n")
 
+    def lock_channel(self):
+        return self._command_lock
+
     def disable_history(self):
         """Disable shell history"""
 

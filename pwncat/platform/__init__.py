@@ -33,6 +33,7 @@ import stat
 import fnmatch
 import logging
 import threading
+import contextlib
 import logging.handlers
 from abc import ABC, abstractmethod
 from typing import List, Type, Union, BinaryIO, Optional, Generator
@@ -577,6 +578,15 @@ class Platform(ABC):
     @abstractmethod
     def exit(self):
         """Exit this session"""
+
+    def lock_channel(self):
+        """Context manager held around a multi-send/read exchange on the
+        raw channel (outside an active Popen) that must not be
+        interleaved with anything else touching the channel, e.g. a
+        keepalive heartbeat. No-op by default; Linux overrides this
+        with its own command/state-transition lock."""
+
+        return contextlib.nullcontext()
 
     @abstractmethod
     def refresh_uid(self) -> Union[int, str]:

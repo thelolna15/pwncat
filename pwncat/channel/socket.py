@@ -99,9 +99,16 @@ class Socket(Channel):
         # track payload, not bare probes -- see pwncat.channel.Ssh's own
         # keepalive for a mechanism known to work against those.
         self.client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+        # Linux names the "idle time before first probe" option
+        # TCP_KEEPIDLE; macOS calls the same thing TCP_KEEPALIVE.
+        idle_opt = getattr(
+            socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)
+        )
+        if idle_opt is not None:
+            self.client.setsockopt(socket.IPPROTO_TCP, idle_opt, 30)
+        if hasattr(socket, "TCP_KEEPINTVL"):
             self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
             self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
     @connect_required
