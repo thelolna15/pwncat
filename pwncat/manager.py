@@ -35,6 +35,7 @@ import datetime
 import tempfile
 import threading
 import contextlib
+import importlib.metadata
 from io import TextIOWrapper
 from enum import Enum, auto
 from typing import Dict, List, Tuple, Union, Callable, Optional, Generator
@@ -794,6 +795,31 @@ class Session:
         self.close()
 
 
+def _resolve_db_uri(uri: str):
+    """Resolve a zodburi-style database URI to a (factory, dbkw) pair.
+
+    shortcut: bypasses zodburi.resolve_uri(), whose pkg_resources-based
+    entry-point loading raises DistributionNotFound for zope.interface on
+    current pip installs even though it's present. Drop once zodburi moves
+    off pkg_resources (this still imports pkg_resources transitively via
+    `import zodburi`, and reaches into zodburi's private `_get_dbkw`).
+    """
+    scheme = uri[: uri.find(":")]
+    try:
+        # Python 3.10+
+        entries = importlib.metadata.entry_points(group="zodburi.resolvers")
+    except TypeError:
+        # Python 3.9: entry_points() takes no arguments and returns a dict
+        entries = importlib.metadata.entry_points().get("zodburi.resolvers", [])
+
+    for entry_point in entries:
+        if entry_point.name == scheme:
+            factory, dbkw = entry_point.load()(uri)
+            return factory, zodburi._get_dbkw(dbkw)
+
+    raise KeyError(f"no resolver found for uri: {uri}")
+
+
 class Manager:
     """
     ``pwncat`` manager which is responsible for creating channels,
@@ -893,7 +919,7 @@ class Manager:
             raise RuntimeError("cannot change database after sessions are established")
 
         # Connect/open the database
-        factory_class, factory_args = zodburi.resolve_uri(self.config["db"])
+        factory_class, factory_args = _resolve_db_uri(self.config["db"])
         storage = factory_class()
         self.db = ZODB.DB(storage, **factory_args)
 

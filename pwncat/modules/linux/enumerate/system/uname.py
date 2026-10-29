@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 import json
 from typing import List, Optional
 
@@ -8,6 +9,36 @@ from pwncat.db import Fact
 from pwncat.facts import ArchData, HostnameData
 from pwncat.platform.linux import Linux
 from pwncat.modules.enumerate import Schedule, EnumerateModule
+
+# Leading digit run of the patch component, e.g. "12" out of "12+kali"
+_PATCH_RE = re.compile(r"(\d+)(.*)")
+
+
+def parse_kernel_revision(revision: str):
+    """Parse a `uname -r` kernel release string into (major, minor, patch, abi).
+
+    shortcut: a non-numeric tag glued onto the patch number without a "-"
+    (e.g. Debian/Kali's "12+kali") is folded into abi instead of raising.
+    """
+
+    major, minor, *patch_and_abi = revision.split(".")
+    patch_and_abi = ".".join(patch_and_abi).split("-")
+    patch = patch_and_abi[0]
+    abi = "-".join(patch_and_abi[1:])
+
+    match = _PATCH_RE.match(patch)
+    if match:
+        patch, extra = match.groups()
+    else:
+        # No leading digits at all (missing patch component, or a
+        # non-numeric one): default patch to 0 and keep the rest as abi.
+        extra, patch = patch, "0"
+
+    extra = extra.lstrip(".")
+    if extra:
+        abi = f"{extra}-{abi}" if abi else extra
+
+    return int(major), int(minor), int(patch), abi
 
 
 class KernelVersionData(Fact):
@@ -107,11 +138,8 @@ class Module(EnumerateModule):
         # operating_system = fields[4] if len(fields) > 4 else None
 
         # Handle kernel versions
-        w, x, *y_and_z = kernel_revision.split(".")
-        y_and_z = ".".join(y_and_z).split("-")
-        y = y_and_z[0]
-        z = "-".join(y_and_z[1:])
-        version = KernelVersionData(self.name, int(w), int(x), int(y), z)
+        major, minor, patch, abi = parse_kernel_revision(kernel_revision)
+        version = KernelVersionData(self.name, major, minor, patch, abi)
         yield version
 
         # Handle arch
