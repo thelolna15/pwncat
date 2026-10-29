@@ -219,20 +219,24 @@ class PopenLinux(pwncat.subprocess.Popen):
         if self.returncode is not None:
             return
 
-        # Kill the process (SIGINT)
-        self.platform.channel.send(util.CTRL_C * 2)
-        self.returncode = -1
-        self.platform.command_running = None
+        # Locked so a heartbeat tick can't slip a byte in between the
+        # signal and clearing command_running.
+        with self.platform._command_lock:
+            # Kill the process (SIGINT)
+            self.platform.channel.send(util.CTRL_C * 2)
+            self.returncode = -1
+            self.platform.command_running = None
 
     def terminate(self):
 
         if self.returncode is not None:
             return
 
-        # Terminate the process (SIGQUIT)
-        self.platform.channel.send(b"\x1c\x1c")
-        self.returncode = -1
-        self.platform.command_running = None
+        with self.platform._command_lock:
+            # Terminate the process (SIGQUIT)
+            self.platform.channel.send(b"\x1c\x1c")
+            self.returncode = -1
+            self.platform.command_running = None
 
     def _receive_returncode(self):
         """All output has been read of the stream, now we read
@@ -569,9 +573,12 @@ class Linux(Platform):
         self.name = "linux"
         self.command_running = None
 
-        # Guards every command-start send, including the keepalive
-        # heartbeat below, so the two can't interleave bytes on the channel.
-        self._command_lock = threading.Lock()
+        # Guards every raw channel write (command start, exit, su/sudo
+        # prompts, pty setup, interactive transitions), including the
+        # keepalive heartbeat below, so none of them can interleave bytes
+        # on the channel. Reentrant: get_pty() nests into the interactive
+        # setter, which nests into Popen() via getenv().
+        self._command_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
 
         self._id = None
@@ -667,14 +674,18 @@ class Linux(Platform):
                 return
             try:
                 self.channel.send(b"\n")
-            except Exception:
+            except Exception as exc:
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
+                )
                 self._heartbeat_stop.set()
 
     def exit(self):
         """Exit this session"""
 
         self._heartbeat_stop.set()
-        self.channel.send(b"exit\n")
+        with self._command_lock:
+            self.channel.send(b"exit\n")
 
     def disable_history(self):
         """Disable shell history"""
@@ -706,59 +717,63 @@ class Linux(Platform):
         if self.has_pty:
             return
 
-        # Grab the current shell PID
-        pid = self.getenv("$")
+        # Held for the whole method (reentrant: nests into the interactive
+        # setter and Popen() below) so the keepalive heartbeat can't
+        # interleave a byte into the raw sendline() payload or setup.
+        with self._command_lock:
+            # Grab the current shell PID
+            pid = self.getenv("$")
 
-        for binaries, payload_format in PTY_OPTIONS:
-            for binary in binaries:
-                binary_path = self.which(binary)
-                if binary_path is None:
+            for binaries, payload_format in PTY_OPTIONS:
+                for binary in binaries:
+                    binary_path = self.which(binary)
+                    if binary_path is None:
+                        continue
+
+                    payload = payload_format.format(
+                        binary_path=binary_path, shell=self.shell
+                    )
+
+                    # Send the payload
+                    self.logger.info(payload)
+                    self.channel.sendline(payload.encode("utf-8"))
+
+                    # Preserve interactivity. This has to happen for `getenv` to function
+                    # It should do no harm if the pty method failed
+                    self.has_pty = True
+                    if not self.interactive:
+                        self._interactive = True
+                        self.interactive = False
+
+                    # Seemed to work
+                    new_pid = self.getenv("$")
+                    if new_pid != pid:
+                        break
+
+                    # We failed, reset the flag
+                    self.has_pty = False
+                else:
                     continue
-
-                payload = payload_format.format(
-                    binary_path=binary_path, shell=self.shell
-                )
-
-                # Send the payload
-                self.logger.info(payload)
-                self.channel.sendline(payload.encode("utf-8"))
-
-                # Preserve interactivity. This has to happen for `getenv` to function
-                # It should do no harm if the pty method failed
-                self.has_pty = True
-                if not self.interactive:
-                    self._interactive = True
-                    self.interactive = False
-
-                # Seemed to work
-                new_pid = self.getenv("$")
-                if new_pid != pid:
-                    break
-
-                # We failed, reset the flag
-                self.has_pty = False
+                break
             else:
-                continue
-            break
-        else:
-            raise PlatformError("no available pty methods")
+                raise PlatformError("no available pty methods")
 
-        # When starting a pty, history is sometimes re-enabled
-        self.disable_history()
+            # When starting a pty, history is sometimes re-enabled
+            self.disable_history()
 
-        # Ensure that the TTY settings make sense. The raw restore string's
-        # iflag word is 0x400 (ixon set), so -ixon -ixoff follow in the same
-        # invocation rather than undoing the interactive setter's fix.
-        self.Popen(
-            [
-                "stty",
-                "400:1:bf:8a33:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
-                "-ixon",
-                "-ixoff",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        ).wait()
+            # Ensure that the TTY settings make sense. The raw restore string's
+            # iflag word is 0x400 (ixon set), so -ixon -ixoff follow in the same
+            # invocation rather than undoing the interactive setter's fix.
+            self.Popen(
+                [
+                    "stty",
+                    "400:1:bf:8a33:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
+                    "-ixon",
+                    "-ixoff",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            ).wait()
 
     def get_host_hash(self) -> str:
         """
@@ -1708,59 +1723,62 @@ class Linux(Platform):
         if value == self._interactive:
             return
 
-        if not value:
-            # -ixon/-ixoff: a 0x13 (Ctrl-S/XOFF) byte in file content
-            # otherwise pauses the pty's output; lnext-escaping it isn't enough.
-            command = (
-                " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
-                + "\n"
-            )
-            self.logger.info(command.rstrip("\n"))
-            self.channel.send(command.encode("utf-8"))
-            self.channel.drain()
-            self._interactive = False
-
-            # update current user and shell variable
-            self.context_changed()
-        else:
-
-            # Going interactive requires a pty
-            self.get_pty()
-
-            # Get local terminal information
-            TERM = os.environ.get("TERM", "xterm")
-            columns, rows = os.get_terminal_size(0)
-
-            prompt = self.PROMPTS.get(
-                os.path.basename(self.shell), self.PROMPTS["default"]
-            )
-
-            # Drain any remaining output from the commands run by pwncat
-            self.channel.drain()
-
-            command = (
-                " ; ".join(
-                    [
-                        " stty sane",
-                        f" stty rows {rows} columns {columns}",
-                        f" export TERM='{TERM}'",
-                        f"""export PS1={prompt}""",
-                    ]
+        # Reentrant: the True branch nests into get_pty(), which nests
+        # back into this setter's False branch and into Popen().
+        with self._command_lock:
+            if not value:
+                # -ixon/-ixoff: a 0x13 (Ctrl-S/XOFF) byte in file content
+                # otherwise pauses the pty's output; lnext-escaping it isn't enough.
+                command = (
+                    " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
+                    + "\n"
                 )
-                + "\n"
-            )
-            self.logger.info(command.rstrip("\n"))
-            self.channel.send(command.encode("utf-8"))
+                self.logger.info(command.rstrip("\n"))
+                self.channel.send(command.encode("utf-8"))
+                self.channel.drain()
+                self._interactive = False
 
-            try:
-                # Try to remove the echo of the above command, if it exists
-                echo_check = self.channel.peek(len(command), timeout=0.5)
-                if b"stty" in echo_check:
-                    self.channel.recvline()
-            except pwncat.channel.ChannelTimeout:
-                pass
+                # update current user and shell variable
+                self.context_changed()
+            else:
 
-            self._interactive = True
+                # Going interactive requires a pty
+                self.get_pty()
+
+                # Get local terminal information
+                TERM = os.environ.get("TERM", "xterm")
+                columns, rows = os.get_terminal_size(0)
+
+                prompt = self.PROMPTS.get(
+                    os.path.basename(self.shell), self.PROMPTS["default"]
+                )
+
+                # Drain any remaining output from the commands run by pwncat
+                self.channel.drain()
+
+                command = (
+                    " ; ".join(
+                        [
+                            " stty sane",
+                            f" stty rows {rows} columns {columns}",
+                            f" export TERM='{TERM}'",
+                            f"""export PS1={prompt}""",
+                        ]
+                    )
+                    + "\n"
+                )
+                self.logger.info(command.rstrip("\n"))
+                self.channel.send(command.encode("utf-8"))
+
+                try:
+                    # Try to remove the echo of the above command, if it exists
+                    echo_check = self.channel.peek(len(command), timeout=0.5)
+                    if b"stty" in echo_check:
+                        self.channel.recvline()
+                except pwncat.channel.ChannelTimeout:
+                    pass
+
+                self._interactive = True
 
     def whoami(self):
         """Get the name of the current user"""
