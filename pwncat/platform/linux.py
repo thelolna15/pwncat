@@ -573,11 +573,15 @@ class Linux(Platform):
         self.name = "linux"
         self.command_running = None
 
-        # Guards every raw channel write (command start, exit, su/sudo
-        # prompts, pty setup, interactive transitions), including the
-        # keepalive heartbeat below, so none of them can interleave bytes
-        # on the channel. Reentrant: get_pty() nests into the interactive
-        # setter, which nests into Popen() via getenv().
+        # Guards raw channel writes that happen while command_running is
+        # still None (command start, exit, pty setup, interactive
+        # transitions, kill/terminate) against the keepalive heartbeat
+        # below. Writes made *during* an active Popen (su/sudo prompts,
+        # LinuxWriter/LinuxReader, its own EOF bytes) don't need it: the
+        # heartbeat already skips while command_running is set, for as
+        # long as that stays true for the whole exchange.
+        # Reentrant: get_pty() nests into the interactive setter, which
+        # nests into Popen() via getenv().
         self._command_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
 
@@ -681,8 +685,8 @@ class Linux(Platform):
         """Send a single no-op byte, unless a command is running, the
         session is live-interactive, or the channel is already busy with
         one of those -- those own the channel's bytes, and skipping here
-        (rather than blocking for a turn) keeps a stalled channel.send()
-        from stalling every other channel operation behind this lock."""
+        (rather than blocking for a turn) keeps a merely-busy channel from
+        stalling every other channel operation behind this lock."""
 
         if not self._command_lock.acquire(blocking=False):
             return
@@ -690,6 +694,14 @@ class Linux(Platform):
             if self.command_running is not None or self._interactive:
                 return
             try:
+                # shortcut: channel.send() has no timeout (paramiko's
+                # sendall() can block forever; Socket.send() busy-loops with
+                # no backoff), so a severely degraded link can still stall
+                # this tick -- and everything waiting on this lock behind
+                # it -- for as long as the link stays stuck. Upgrade once
+                # Channel exposes a send timeout; a merely-idle (not
+                # congested) link, this feature's actual target, sends
+                # instantly.
                 self.channel.send(b"\n")
             except Exception as exc:
                 self.session.log(

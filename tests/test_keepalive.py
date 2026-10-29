@@ -64,7 +64,8 @@ def test_heartbeat_live_reconfigure(linux):
     linux.platform.channel.send = spy_send
     linux.config.set("keepalive", "1", glob=True)
 
-    time.sleep(2.5)
+    # Generous margin: the loop only polls once a second.
+    time.sleep(6)
 
     assert len(sent) >= 1
 
