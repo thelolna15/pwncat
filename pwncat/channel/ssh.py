@@ -6,6 +6,7 @@ shell and grabs a PTY. It then wraps the SSH channel in a pwncat channel.
 This module requires a host, user and either a password or identity (key) file.
 An optional port argument is also accepted.
 """
+
 import os
 import socket
 from typing import Union, TextIO, Optional
@@ -59,6 +60,10 @@ class Ssh(Channel):
                 look_for_keys=False,
             )
 
+            # Protocol-level no-op packets; keeps NAT/firewall connection
+            # tracking alive on idle sessions, same idea as ServerAliveInterval.
+            client.get_transport().set_keepalive(30)
+
             columns, rows = os.get_terminal_size(0)
             shell = client.invoke_shell(width=columns, height=rows)
             shell.setblocking(0)
@@ -80,11 +85,22 @@ class Ssh(Channel):
         self._connected = False
         self.client.close()
 
-    def send(self, data: bytes):
+    def _send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call
         that only returns after all data is sent."""
 
-        self.client.sendall(data)
+        while True:
+            try:
+                self.client.sendall(data)
+                break
+            except socket.timeout:
+                # The channel is non-blocking (see __init__); paramiko
+                # raises this immediately when the send window is
+                # momentarily full, not on an actual dead connection.
+                continue
+            except (OSError, paramiko.SSHException) as exc:
+                self._connected = False
+                raise ChannelClosed(self) from exc
 
         return len(data)
 

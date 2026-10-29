@@ -10,6 +10,7 @@ Popen can be running at a time. It is imperative that you call
 ``Popen.wait`` or wait for ``Popen.poll`` to return non-Null prior
 to calling any other pwncat methods.
 """
+
 import os
 import stat
 import time
@@ -18,6 +19,7 @@ import shutil
 import hashlib
 import pathlib
 import tempfile
+import threading
 import subprocess
 from io import TextIOWrapper, BufferedIOBase, UnsupportedOperation
 from typing import List, Union, BinaryIO, Optional, Generator
@@ -217,7 +219,9 @@ class PopenLinux(pwncat.subprocess.Popen):
         if self.returncode is not None:
             return
 
-        # Kill the process (SIGINT)
+        # channel.send() is atomic on its own (see Channel.send); no
+        # platform lock here so a stuck keepalive heartbeat can never
+        # block the one thing meant to recover from a hung command.
         self.platform.channel.send(util.CTRL_C * 2)
         self.returncode = -1
         self.platform.command_running = None
@@ -227,8 +231,7 @@ class PopenLinux(pwncat.subprocess.Popen):
         if self.returncode is not None:
             return
 
-        # Terminate the process (SIGQUIT)
-        self.platform.channel.send(b"\x1C\x1C")
+        self.platform.channel.send(b"\x1c\x1c")
         self.returncode = -1
         self.platform.command_running = None
 
@@ -567,6 +570,20 @@ class Linux(Platform):
         self.name = "linux"
         self.command_running = None
 
+        # Channel.send() is already atomic per call (see pwncat.channel),
+        # which is enough for every one-shot send in this file. This lock
+        # instead guards command_running/_interactive *state transitions*
+        # that span several sends/reads as one logical unit (Popen's
+        # check-send-mark, get_pty(), the interactive setter) against the
+        # keepalive heartbeat below, which checks that same state before
+        # ticking. kill()/terminate()/exit() don't need it: a stray
+        # heartbeat byte next to a single already-atomic send is harmless.
+        # Reentrant: get_pty() nests into the interactive setter, which
+        # nests into Popen() via getenv().
+        self._command_lock = threading.RLock()
+        self._heartbeat_stop = threading.Event()
+        self._exited = False
+
         self._id = None
 
         # This causes an stty to be sent.
@@ -637,10 +654,116 @@ class Linux(Platform):
 
         self.refresh_uid()
 
+        # Always running (cheap: one wakeup per second, no I/O unless a
+        # tick is due) so `set -g keepalive N` takes effect on this live
+        # session instead of only on the next connection.
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self):
+        """Poll the `keepalive` config every second and, once that many
+        seconds have passed since the last tick, call `_heartbeat_tick` to
+        keep NAT/proxy connection tracking (e.g. ngrok) from dropping an
+        idle session. Stops as soon as the channel is known disconnected
+        or on any unexpected error, rather than dying silently."""
+
+        last_tick = time.monotonic()
+        while not self._heartbeat_stop.wait(1):
+            try:
+                if not self.channel.connected:
+                    return
+
+                interval = self.session.config.get("keepalive", 0)
+                if interval <= 0:
+                    last_tick = time.monotonic()
+                    continue
+
+                now = time.monotonic()
+                if now - last_tick >= interval:
+                    self._heartbeat_tick()
+                    last_tick = now
+            except Exception as exc:
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
+                )
+                self._heartbeat_stop.set()
+                return
+
+    def _heartbeat_tick(self):
+        """Send a single no-op byte, unless a command is running, the
+        session is live-interactive, or the channel is already busy with
+        one of those -- those own the channel's bytes, and skipping here
+        (rather than blocking for a turn) keeps a merely-busy channel from
+        stalling every other channel operation behind this lock.
+
+        shortcut: this intentionally does nothing while live-interactive
+        (there's no byte that's guaranteed safe to inject mid-typing
+        across every program a user might be running). It protects the
+        scripted/local-prompt idle case; a Socket channel's always-on
+        SO_KEEPALIVE (pwncat/channel/socket.py) is the zero-risk layer
+        that also runs during live-interactive, though it isn't
+        guaranteed effective against every NAT/proxy's idle policy.
+        """
+
+        if not self._command_lock.acquire(blocking=False):
+            return
+        try:
+            if self.command_running is not None or self._interactive:
+                return
+            try:
+                # shortcut: channel.send() has no timeout (paramiko's
+                # sendall() can block forever; Socket.send() busy-loops with
+                # no backoff), so a severely degraded link can still stall
+                # this tick -- and everything waiting on this lock behind
+                # it -- for as long as the link stays stuck. Upgrade once
+                # Channel exposes a send timeout; a merely-idle (not
+                # congested) link, this feature's actual target, sends
+                # instantly.
+                self.channel.send(b"\n")
+            except pwncat.channel.ChannelClosed as exc:
+                # The channel itself says it's dead; no point retrying.
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat stopped: {exc}"
+                )
+                self._heartbeat_stop.set()
+            except Exception as exc:
+                # Anything else might be transient (a blip, not a dead
+                # channel); warn once and let the next tick try again
+                # rather than disabling keepalive for the rest of the
+                # session over a single hiccup.
+                self.session.log(
+                    f"[yellow]warning[/yellow]: keepalive heartbeat send failed: {exc}"
+                )
+        finally:
+            self._command_lock.release()
+
     def exit(self):
         """Exit this session"""
 
+        # Idempotent: Session.__init__ can call this directly (to clean
+        # up on a failure after construction) and manager.sessions can
+        # also hold the same half-constructed Session, so Manager's own
+        # cleanup may call it again.
+        if self._exited:
+            return
+        self._exited = True
+
+        # Joined before the caller closes the channel, so the heartbeat
+        # thread can't be mid-send() on an fd that's about to close out
+        # from under it. The 2s timeout covers the thread just sleeping;
+        # it doesn't bound this method overall -- same shortcut as
+        # _heartbeat_tick's send() -- if the thread is genuinely stuck
+        # inside a stalled send(), the join times out and the exit\n send
+        # right below then queues up behind the same still-held channel
+        # write lock.
+        self._heartbeat_stop.set()
+        self._heartbeat_thread.join(timeout=2)
         self.channel.send(b"exit\n")
+
+    def lock_channel(self):
+        return self._command_lock
 
     def disable_history(self):
         """Disable shell history"""
@@ -672,59 +795,63 @@ class Linux(Platform):
         if self.has_pty:
             return
 
-        # Grab the current shell PID
-        pid = self.getenv("$")
+        # Held for the whole method (reentrant: nests into the interactive
+        # setter and Popen() below) so the keepalive heartbeat can't
+        # interleave a byte into the raw sendline() payload or setup.
+        with self._command_lock:
+            # Grab the current shell PID
+            pid = self.getenv("$")
 
-        for binaries, payload_format in PTY_OPTIONS:
-            for binary in binaries:
-                binary_path = self.which(binary)
-                if binary_path is None:
+            for binaries, payload_format in PTY_OPTIONS:
+                for binary in binaries:
+                    binary_path = self.which(binary)
+                    if binary_path is None:
+                        continue
+
+                    payload = payload_format.format(
+                        binary_path=binary_path, shell=self.shell
+                    )
+
+                    # Send the payload
+                    self.logger.info(payload)
+                    self.channel.sendline(payload.encode("utf-8"))
+
+                    # Preserve interactivity. This has to happen for `getenv` to function
+                    # It should do no harm if the pty method failed
+                    self.has_pty = True
+                    if not self.interactive:
+                        self._interactive = True
+                        self.interactive = False
+
+                    # Seemed to work
+                    new_pid = self.getenv("$")
+                    if new_pid != pid:
+                        break
+
+                    # We failed, reset the flag
+                    self.has_pty = False
+                else:
                     continue
-
-                payload = payload_format.format(
-                    binary_path=binary_path, shell=self.shell
-                )
-
-                # Send the payload
-                self.logger.info(payload)
-                self.channel.sendline(payload.encode("utf-8"))
-
-                # Preserve interactivity. This has to happen for `getenv` to function
-                # It should do no harm if the pty method failed
-                self.has_pty = True
-                if not self.interactive:
-                    self._interactive = True
-                    self.interactive = False
-
-                # Seemed to work
-                new_pid = self.getenv("$")
-                if new_pid != pid:
-                    break
-
-                # We failed, reset the flag
-                self.has_pty = False
+                break
             else:
-                continue
-            break
-        else:
-            raise PlatformError("no available pty methods")
+                raise PlatformError("no available pty methods")
 
-        # When starting a pty, history is sometimes re-enabled
-        self.disable_history()
+            # When starting a pty, history is sometimes re-enabled
+            self.disable_history()
 
-        # Ensure that the TTY settings make sense. The raw restore string's
-        # iflag word is 0x400 (ixon set), so -ixon -ixoff follow in the same
-        # invocation rather than undoing the interactive setter's fix.
-        self.Popen(
-            [
-                "stty",
-                "400:1:bf:8a33:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
-                "-ixon",
-                "-ixoff",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        ).wait()
+            # Ensure that the TTY settings make sense. The raw restore string's
+            # iflag word is 0x400 (ixon set), so -ixon -ixoff follow in the same
+            # invocation rather than undoing the interactive setter's fix.
+            self.Popen(
+                [
+                    "stty",
+                    "400:1:bf:8a33:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
+                    "-ixon",
+                    "-ixoff",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            ).wait()
 
     def get_host_hash(self) -> str:
         """
@@ -1121,94 +1248,97 @@ class Linux(Platform):
         else:
             raise ValueError("expected a command string or list of arguments")
 
-        if self.command_running is not None:
-            raise PlatformError(
-                f"attempting to run {repr(command)} during execution of {self.command_running.args}!"
-            )
-
-        # This breaks `euid` situations. Not all shells support -p, so I think just not
-        # using this is a better option. I'm leaving it here just in case removing it
-        # causes problems in the future. Tests seem positive so far.
-        # if shell:
-        #     # Ensure this works normally
-        #     command = shlex.join(["/bin/sh", "-c", command])
-
-        if cwd is not None:
-            command = f"(cd {cwd} && {command})"
-
-        if env is not None:
-            command = (
-                " ".join(
-                    [
-                        f"{util.quote(name)}={util.quote(value)}"
-                        for name, value in env.items()
-                    ]
+        # Held through the check-send-mark sequence below so the keepalive
+        # heartbeat can never inject a byte into an in-flight command.
+        with self._command_lock:
+            if self.command_running is not None:
+                raise PlatformError(
+                    f"attempting to run {repr(command)} during execution of {self.command_running.args}!"
                 )
-                + " "
-                + command
+
+            # This breaks `euid` situations. Not all shells support -p, so I think just not
+            # using this is a better option. I'm leaving it here just in case removing it
+            # causes problems in the future. Tests seem positive so far.
+            # if shell:
+            #     # Ensure this works normally
+            #     command = shlex.join(["/bin/sh", "-c", command])
+
+            if cwd is not None:
+                command = f"(cd {cwd} && {command})"
+
+            if env is not None:
+                command = (
+                    " ".join(
+                        [
+                            f"{util.quote(name)}={util.quote(value)}"
+                            for name, value in env.items()
+                        ]
+                    )
+                    + " "
+                    + command
+                )
+
+            if isinstance(stdout, str):
+                command += f" >{stdout}"
+            elif stdout == pwncat.subprocess.DEVNULL:
+                command += " >/dev/null"
+
+            if isinstance(stderr, str):
+                command += f" 2>{stderr}"
+            elif stderr == pwncat.subprocess.DEVNULL:
+                command += " 2>/dev/null"
+
+            if isinstance(stdin, str):
+                command += f" 0<{stdin}"
+            elif stdin == pwncat.subprocess.DEVNULL:
+                command += " 0</dev/null"
+            elif stdin != pwncat.subprocess.PIPE:
+                # if a process requests stdin but we aren't expecting it
+                # things can get wonky. We prevent that by kill stdin unless
+                # explicitly asked for.
+                command += " 0</dev/null"
+
+            # Generate delimeters
+            start_delim = util.random_string(10)
+            end_delim = util.random_string(10)
+            code_delim = util.random_string(10)
+
+            commands = []
+            commands.append(" export PS1=")
+            commands.append(
+                f"echo; echo {start_delim}; {command}; R=$?; echo {end_delim}; echo $R; echo {code_delim}"
             )
 
-        if isinstance(stdout, str):
-            command += f" >{stdout}"
-        elif stdout == pwncat.subprocess.DEVNULL:
-            command += " >/dev/null"
+            # Build the final command
+            command = ";".join(commands).encode("utf-8")
 
-        if isinstance(stderr, str):
-            command += f" 2>{stderr}"
-        elif stderr == pwncat.subprocess.DEVNULL:
-            command += " 2>/dev/null"
+            # Send the command
+            if send_command is None:
+                self.channel.send(command + b"\n")
+            else:
+                send_command(command + b"\n")
 
-        if isinstance(stdin, str):
-            command += f" 0<{stdin}"
-        elif stdin == pwncat.subprocess.DEVNULL:
-            command += " 0</dev/null"
-        elif stdin != pwncat.subprocess.PIPE:
-            # if a process requests stdin but we aren't expecting it
-            # things can get wonky. We prevent that by kill stdin unless
-            # explicitly asked for.
-            command += " 0</dev/null"
+            # Send bootstraping input if provided
+            if bootstrap_input is not None:
+                self.channel.send(bootstrap_input)
 
-        # Generate delimeters
-        start_delim = util.random_string(10)
-        end_delim = util.random_string(10)
-        code_delim = util.random_string(10)
+            # Log the command
+            self.logger.info(command.decode("utf-8"))
 
-        commands = []
-        commands.append(" export PS1=")
-        commands.append(
-            f"echo; echo {start_delim}; {command}; R=$?; echo {end_delim}; echo $R; echo {code_delim}"
-        )
-
-        # Build the final command
-        command = ";".join(commands).encode("utf-8")
-
-        # Send the command
-        if send_command is None:
-            self.channel.send(command + b"\n")
-        else:
-            send_command(command + b"\n")
-
-        # Send bootstraping input if provided
-        if bootstrap_input is not None:
-            self.channel.send(bootstrap_input)
-
-        # Log the command
-        self.logger.info(command.decode("utf-8"))
-
-        popen = PopenLinux(
-            self,
-            args,
-            stdout,
-            stdin,
-            text,
-            encoding,
-            errors,
-            bufsize,
-            start_delim.encode("utf-8") + b"\n",
-            end_delim.encode("utf-8") + b"\n",
-            code_delim.encode("utf-8") + b"\n",
-        )
-        self.command_running = popen
+            popen = PopenLinux(
+                self,
+                args,
+                stdout,
+                stdin,
+                text,
+                encoding,
+                errors,
+                bufsize,
+                start_delim.encode("utf-8") + b"\n",
+                end_delim.encode("utf-8") + b"\n",
+                code_delim.encode("utf-8") + b"\n",
+            )
+            self.command_running = popen
 
         return popen
 
@@ -1671,59 +1801,62 @@ class Linux(Platform):
         if value == self._interactive:
             return
 
-        if not value:
-            # -ixon/-ixoff: a 0x13 (Ctrl-S/XOFF) byte in file content
-            # otherwise pauses the pty's output; lnext-escaping it isn't enough.
-            command = (
-                " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
-                + "\n"
-            )
-            self.logger.info(command.rstrip("\n"))
-            self.channel.send(command.encode("utf-8"))
-            self.channel.drain()
-            self._interactive = False
-
-            # update current user and shell variable
-            self.context_changed()
-        else:
-
-            # Going interactive requires a pty
-            self.get_pty()
-
-            # Get local terminal information
-            TERM = os.environ.get("TERM", "xterm")
-            columns, rows = os.get_terminal_size(0)
-
-            prompt = self.PROMPTS.get(
-                os.path.basename(self.shell), self.PROMPTS["default"]
-            )
-
-            # Drain any remaining output from the commands run by pwncat
-            self.channel.drain()
-
-            command = (
-                " ; ".join(
-                    [
-                        " stty sane",
-                        f" stty rows {rows} columns {columns}",
-                        f" export TERM='{TERM}'",
-                        f"""export PS1={prompt}""",
-                    ]
+        # Reentrant: the True branch nests into get_pty(), which nests
+        # back into this setter's False branch and into Popen().
+        with self._command_lock:
+            if not value:
+                # -ixon/-ixoff: a 0x13 (Ctrl-S/XOFF) byte in file content
+                # otherwise pauses the pty's output; lnext-escaping it isn't enough.
+                command = (
+                    " ; ".join([" stty -echo nl lnext ^V -ixon -ixoff", "export PS1="])
+                    + "\n"
                 )
-                + "\n"
-            )
-            self.logger.info(command.rstrip("\n"))
-            self.channel.send(command.encode("utf-8"))
+                self.logger.info(command.rstrip("\n"))
+                self.channel.send(command.encode("utf-8"))
+                self.channel.drain()
+                self._interactive = False
 
-            try:
-                # Try to remove the echo of the above command, if it exists
-                echo_check = self.channel.peek(len(command), timeout=0.5)
-                if b"stty" in echo_check:
-                    self.channel.recvline()
-            except pwncat.channel.ChannelTimeout:
-                pass
+                # update current user and shell variable
+                self.context_changed()
+            else:
 
-            self._interactive = True
+                # Going interactive requires a pty
+                self.get_pty()
+
+                # Get local terminal information
+                TERM = os.environ.get("TERM", "xterm")
+                columns, rows = os.get_terminal_size(0)
+
+                prompt = self.PROMPTS.get(
+                    os.path.basename(self.shell), self.PROMPTS["default"]
+                )
+
+                # Drain any remaining output from the commands run by pwncat
+                self.channel.drain()
+
+                command = (
+                    " ; ".join(
+                        [
+                            " stty sane",
+                            f" stty rows {rows} columns {columns}",
+                            f" export TERM='{TERM}'",
+                            f"""export PS1={prompt}""",
+                        ]
+                    )
+                    + "\n"
+                )
+                self.logger.info(command.rstrip("\n"))
+                self.channel.send(command.encode("utf-8"))
+
+                try:
+                    # Try to remove the echo of the above command, if it exists
+                    echo_check = self.channel.peek(len(command), timeout=0.5)
+                    if b"stty" in echo_check:
+                        self.channel.recvline()
+                except pwncat.channel.ChannelTimeout:
+                    pass
+
+                self._interactive = True
 
     def whoami(self):
         """Get the name of the current user"""

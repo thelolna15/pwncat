@@ -20,6 +20,7 @@ specific to your module or command.
    required parameters to a module.
 
 """
+
 import os
 import copy
 import ipaddress
@@ -110,6 +111,7 @@ class Config:
             "cross": {"value": None, "type": str},
             "psmodules": {"value": ".", "type": local_dir_type},
             "verbose": {"value": False, "type": bool_type},
+            "keepalive": {"value": 0, "type": int},
             "plugin_path": {
                 "value": "~/.local/share/pwncat",
                 "type": local_dir_type,

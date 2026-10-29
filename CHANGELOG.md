@@ -8,16 +8,23 @@ The Changelog starts with v0.4.1, because we did not keep one before that,
 and simply didn't have the time to go back and retroactively create one.
 
 ## [Unreleased]
+
+## [0.5.5] - 2026-10-30
+### Added
+- Added an opt-in `keepalive` config value (seconds, default `0`/off, live-reconfigurable): while idle at the local prompt or in a script (not while live-interactive, where no byte is guaranteed safe to inject mid-typing), the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
+- Socket-based channels (bind/connect) now enable TCP-level `SO_KEEPALIVE`, always on regardless of the `keepalive` setting above: zero-risk since it never touches the shell's byte stream, so unlike the heartbeat it also runs during live-interactive use (not guaranteed to reset every NAT/proxy's idle timer, since some only count payload, not bare probes)
+- SSH channel now enables paramiko's protocol-level transport keepalive (fixed 30s interval), the same fix `ssh -o ServerAliveInterval` gives you
+- Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
+
 ### Fixed
+- Fixed `Channel.send()` across every channel type not being safe to call from more than one thread at a time (needed for the new `keepalive` heartbeat above, but closes the same gap for any other code sending to the channel concurrently)
+- Fixed `GTFOExecute.shell()` (used by `escalate`) being able to have its GTFOBins payload and trigger-input sends interleaved with unrelated channel traffic
 - Fixed `pwncat.platform` failing to import on Python builds without `readline` (e.g. musl-based), even for Linux-only sessions
 - Fixed a near-deterministic hang writing/reading binary file content containing `0x13` (Ctrl-S/XOFF): pty software flow control wasn't disabled, so that byte paused the shell's output indefinitely
 - Fixed `Manager` crashing on startup for any db URI (including the default `memory://`) because `zodburi`'s `pkg_resources`-based lookup can't resolve `zope.interface` on current pip installs
 - Fixed `enumerate.system.uname` crashing on kernel release strings with a non-numeric suffix glued onto the patch number (e.g. Kali's `6.18.12+kali-amd64`)
 - Fixed `shlex.join` use with non-str type objects (e.g. `RemotePath`)
 - Fixed `set` command use with incorrect keys (e.g. `set invalid value`)
-
-### Added
-- Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
 
 ## [0.5.4] - 2022-01-27
 Bug fix for the `load` command.
