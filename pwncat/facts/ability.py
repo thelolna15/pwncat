@@ -441,12 +441,21 @@ class GTFOExecute(ExecuteAbility):
             gtfo=session.platform.gtfo, shell=full_command, **self.kwargs
         )
 
-        # Send the payload
-        session.platform.channel.send(payload.encode("utf-8") + b"\n")
+        # Locked as one unit: a keepalive tick landing between the payload
+        # and its trigger input would corrupt this exchange. A no-op on
+        # any platform without a keepalive heartbeat to race against.
+        with session.platform.lock_channel():
+            # Send the payload
+            session.platform.channel.send(payload.encode("utf-8") + b"\n")
 
-        # Send the input needed to trigger execution
-        session.platform.channel.send(input_data)
+            # Send the input needed to trigger execution
+            session.platform.channel.send(input_data)
 
+        # shortcut: the lock above ends here, but the caller's brief
+        # settling pause before marking the new shell busy/interactive is
+        # not covered. A heartbeat tick landing in that gap only sends a
+        # blank line (harmless to a shell prompt), not another payload
+        # byte, so this is lower-risk than the exchange above.
         return lambda session: session.platform.channel.send(
             exit_cmd.encode("utf-8") + b"\n"
         )

@@ -93,8 +93,26 @@ class Socket(Channel):
         self.client.setblocking(False)
         fcntl.fcntl(self.client, fcntl.F_SETFL, os.O_NONBLOCK)
 
+        # TCP-level keepalive: doesn't touch the shell's byte stream (so,
+        # unlike the Linux platform's own `keepalive` heartbeat, it's safe
+        # to always run, even mid-interactive), but some NAT/proxies only
+        # track payload, not bare probes -- see pwncat.channel.Ssh's own
+        # keepalive for a mechanism known to work against those.
+        self.client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Linux names the "idle time before first probe" option
+        # TCP_KEEPIDLE; macOS calls the same thing TCP_KEEPALIVE.
+        idle_opt = getattr(
+            socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)
+        )
+        if idle_opt is not None:
+            self.client.setsockopt(socket.IPPROTO_TCP, idle_opt, 30)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
     @connect_required
-    def send(self, data: bytes):
+    def _send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call
         that only returns after all data is sent."""
 
@@ -105,7 +123,8 @@ class Socket(Channel):
                     written += self.client.send(data[written:])
                 except (BlockingIOError, ssl.SSLWantWriteError, ssl.SSLWantReadError):
                     pass
-        except BrokenPipeError as exc:
+        except ConnectionError as exc:
+            # Covers BrokenPipeError, ConnectionResetError, etc.
             self._connected = False
             raise ChannelClosed(self) from exc
         except (ssl.SSLEOFError, ssl.SSLSyscallError, ssl.SSLZeroReturnError) as exc:

@@ -14,6 +14,7 @@ locate an appropriate channel based on your arguments, and pass all arguments
 to the constructor for the appropriate channel type.
 """
 import time
+import threading
 from io import DEFAULT_BUFFER_SIZE, RawIOBase, BufferedReader, BufferedWriter
 from abc import ABC, abstractmethod
 from typing import Type, Union, Optional
@@ -291,6 +292,11 @@ class Channel(ABC):
 
         self.peek_buffer: bytes = b""
 
+        # Serializes every send() across whatever's calling it (commands,
+        # modules, platform code, a background keepalive thread, ...) so
+        # two callers can never interleave bytes on the wire.
+        self._write_lock = threading.Lock()
+
     @property
     @abstractmethod
     def connected(self):
@@ -311,15 +317,24 @@ class Channel(ABC):
         to instantiate the session.
         """
 
-    @abstractmethod
     def send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call
-        that only returns after all data is sent.
+        that only returns after all data is sent. Holds ``_write_lock``
+        for the duration, so concrete channels implement ``_send``
+        instead of overriding this directly.
 
         :param data: the data to send to the victim
         :type data: bytes
         :rtype: None
         """
+
+        with self._write_lock:
+            return self._send(data)
+
+    @abstractmethod
+    def _send(self, data: bytes):
+        """Concrete channels implement the actual write here. See
+        ``send``, which every caller should use instead."""
 
     def sendline(self, data: bytes, end: bytes = b"\n"):
         """Send data followed by an ending character. If no ending
