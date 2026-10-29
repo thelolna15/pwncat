@@ -56,12 +56,12 @@ class SSLBind(Bind):
             # Literally taken from: https://cryptography.io/en/latest/x509/tutorial/
             subject = issuer = x509.Name(
                 [
-                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
-                    x509.NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
-                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"My Company"),
-                    x509.NameAttribute(NameOID.COMMON_NAME, u"mysite.com"),
+                    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+                    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
+                    x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
+                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "My Company"),
+                    x509.NameAttribute(NameOID.COMMON_NAME, "mysite.com"),
                 ]
             )
             cert = (
@@ -75,7 +75,7 @@ class SSLBind(Bind):
                     datetime.datetime.utcnow() + datetime.timedelta(days=365)
                 )
                 .add_extension(
-                    x509.SubjectAlternativeName([x509.DNSName(u"localhost")]),
+                    x509.SubjectAlternativeName([x509.DNSName("localhost")]),
                     critical=False,
                 )
                 .sign(key, hashes.SHA256())
