@@ -93,6 +93,17 @@ class Socket(Channel):
         self.client.setblocking(False)
         fcntl.fcntl(self.client, fcntl.F_SETFL, os.O_NONBLOCK)
 
+        # TCP-level keepalive: doesn't touch the shell's byte stream (so,
+        # unlike the Linux platform's own `keepalive` heartbeat, it's safe
+        # to always run, even mid-interactive), but some NAT/proxies only
+        # track payload, not bare probes -- see pwncat.channel.Ssh's own
+        # keepalive for a mechanism known to work against those.
+        self.client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
     @connect_required
     def _send(self, data: bytes):
         """Send data to the remote shell. This is a blocking call

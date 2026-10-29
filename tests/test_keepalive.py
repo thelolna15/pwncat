@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import io
 import time
+import socket
 
 import pytest
 
@@ -140,3 +141,12 @@ def test_heartbeat_does_not_corrupt_long_running_command(linux):
         check=True,
     )
     assert output.stdout.strip() == "done"
+
+
+def test_socket_channel_enables_tcp_keepalive(linux):
+    """Socket-based channels (bind/connect) should always have
+    SO_KEEPALIVE on, regardless of the `keepalive` config -- it's a
+    different, zero-risk mechanism safe even mid-interactive."""
+
+    sock = linux.platform.channel.client
+    assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0

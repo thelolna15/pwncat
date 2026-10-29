@@ -9,7 +9,8 @@ and simply didn't have the time to go back and retroactively create one.
 
 ## [Unreleased]
 ### Added
-- Added an opt-in `keepalive` config value (seconds, default `0`/off, live-reconfigurable): while idle, the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
+- Added an opt-in `keepalive` config value (seconds, default `0`/off, live-reconfigurable): while idle at the local prompt or in a script (not while live-interactive, where no byte is guaranteed safe to inject mid-typing), the Linux platform sends a no-op byte on the channel every interval to stop NAT/proxy connection tracking (e.g. ngrok) from dropping the session for inactivity
+- Socket-based channels (bind/connect) now enable TCP-level `SO_KEEPALIVE`, always on regardless of the `keepalive` setting above: zero-risk since it never touches the shell's byte stream, so unlike the heartbeat it also runs during live-interactive use (not guaranteed to reset every NAT/proxy's idle timer, since some only count payload, not bare probes)
 - SSH channel now enables paramiko's protocol-level transport keepalive (fixed 30s interval), the same fix `ssh -o ServerAliveInterval` gives you
 - Added missed `PlatformError` for `upload` command (e.g. "no gtfobins writers available")
 

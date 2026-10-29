@@ -695,7 +695,16 @@ class Linux(Platform):
         session is live-interactive, or the channel is already busy with
         one of those -- those own the channel's bytes, and skipping here
         (rather than blocking for a turn) keeps a merely-busy channel from
-        stalling every other channel operation behind this lock."""
+        stalling every other channel operation behind this lock.
+
+        shortcut: this intentionally does nothing while live-interactive
+        (there's no byte that's guaranteed safe to inject mid-typing
+        across every program a user might be running). It protects the
+        scripted/local-prompt idle case; a Socket channel's always-on
+        SO_KEEPALIVE (pwncat/channel/socket.py) is the zero-risk layer
+        that also runs during live-interactive, though it isn't
+        guaranteed effective against every NAT/proxy's idle policy.
+        """
 
         if not self._command_lock.acquire(blocking=False):
             return
