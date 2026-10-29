@@ -534,15 +534,26 @@ class Session:
         if active or self.manager.target is None:
             self.manager.target = self
 
-        # Initialize the host reference
-        self.hash = self.platform.get_host_hash()
+        try:
+            # Initialize the host reference
+            self.hash = self.platform.get_host_hash()
 
-        if self.target is None:
-            self.register_new_host()
-        else:
-            self.log("loaded known host from db")
+            if self.target is None:
+                self.register_new_host()
+            else:
+                self.log("loaded known host from db")
 
-        self.platform.get_pty()
+            self.platform.get_pty()
+        except Exception:
+            # This Session never finishes constructing and is never
+            # returned to a caller, so nothing else can clean up the
+            # platform's channel/background threads (e.g. a keepalive
+            # heartbeat) -- do it here before propagating.
+            try:
+                self.platform.exit()
+            except Exception:
+                pass
+            raise
 
         # Register this session with the manager
         # some of the methods used above can raise an exception

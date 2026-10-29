@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import io
+import os
 import time
 import socket
 
 import pytest
 
 import pwncat.channel
+import pwncat.manager
+from pwncat.platform import PlatformError
+from pwncat.platform.linux import Linux
 
 
 def test_keepalive_disabled_by_default(session):
@@ -150,3 +154,45 @@ def test_socket_channel_enables_tcp_keepalive(linux):
 
     sock = linux.platform.channel.client
     assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+
+
+def test_session_init_failure_stops_heartbeat_thread(monkeypatch):
+    """Session.__init__ calls get_pty() on the already-constructed
+    platform; if that raises, the Session is never returned to anyone,
+    so nothing else can stop the heartbeat thread Linux.__init__
+    already started. Session.__init__ must call platform.exit() itself
+    on that failure path."""
+
+    if "UBUNTU_HOST" not in os.environ or "UBUNTU_BIND_PORT" not in os.environ:
+        pytest.skip("ubuntu not available")
+
+    exited = []
+    real_exit = Linux.exit
+
+    def spy_exit(self):
+        exited.append(self)
+        real_exit(self)
+
+    def boom(self):
+        raise PlatformError("simulated: no available pty methods")
+
+    monkeypatch.setattr(Linux, "get_pty", boom)
+    monkeypatch.setattr(Linux, "exit", spy_exit)
+
+    with pwncat.manager.Manager(config=None) as manager:
+        manager.config.set("db", "memory://", True)
+
+        with pytest.raises(PlatformError):
+            manager.create_session(
+                platform="linux",
+                host=os.environ["UBUNTU_HOST"],
+                port=int(os.environ["UBUNTU_BIND_PORT"]),
+                protocol="connect",
+            )
+
+    # exit() is idempotent and may be called more than once (here, by
+    # both the new cleanup path and Manager's own cleanup of the
+    # half-constructed Session it already registered); what matters is
+    # that it ran and the thread actually stopped.
+    assert len(exited) >= 1
+    assert exited[0]._heartbeat_stop.is_set()

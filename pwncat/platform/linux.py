@@ -582,6 +582,7 @@ class Linux(Platform):
         # nests into Popen() via getenv().
         self._command_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
+        self._exited = False
 
         self._id = None
 
@@ -740,6 +741,14 @@ class Linux(Platform):
 
     def exit(self):
         """Exit this session"""
+
+        # Idempotent: Session.__init__ can call this directly (to clean
+        # up on a failure after construction) and manager.sessions can
+        # also hold the same half-constructed Session, so Manager's own
+        # cleanup may call it again.
+        if self._exited:
+            return
+        self._exited = True
 
         # Joined before the caller closes the channel, so the heartbeat
         # thread can't be mid-send() on an fd that's about to close out
