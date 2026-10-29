@@ -712,20 +712,16 @@ class Linux(Platform):
         # When starting a pty, history is sometimes re-enabled
         self.disable_history()
 
-        # Ensure that the TTY settings make sense
+        # Ensure that the TTY settings make sense. The raw restore string's
+        # iflag word is 0x400 (ixon set), so -ixon -ixoff follow in the same
+        # invocation rather than undoing the interactive setter's fix.
         self.Popen(
             [
                 "stty",
                 "400:1:bf:8a33:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
+                "-ixon",
+                "-ixoff",
             ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        ).wait()
-
-        # The raw restore above re-enables ixon (its iflag word is 0x400),
-        # undoing the flow-control fix from the interactive setter.
-        self.Popen(
-            ["stty", "-ixon", "-ixoff"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
         ).wait()
