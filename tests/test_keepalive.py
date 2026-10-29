@@ -67,12 +67,13 @@ def test_heartbeat_tick_survives_transient_send_error(linux):
 
     linux.platform.channel.send = boom
 
-    linux.platform._heartbeat_tick()
-
-    assert not linux.platform._heartbeat_stop.is_set()
-
-    # Restore before teardown sends its own exit\n.
-    linux.platform.channel.send = real_send
+    try:
+        linux.platform._heartbeat_tick()
+        assert not linux.platform._heartbeat_stop.is_set()
+    finally:
+        # Restore even on assertion failure, before teardown sends its
+        # own exit\n.
+        linux.platform.channel.send = real_send
 
 
 def test_heartbeat_tick_stops_on_channel_closed(linux):
@@ -86,12 +87,13 @@ def test_heartbeat_tick_stops_on_channel_closed(linux):
 
     linux.platform.channel.send = boom
 
-    linux.platform._heartbeat_tick()
-
-    assert linux.platform._heartbeat_stop.is_set()
-
-    # Restore before teardown sends its own exit\n.
-    linux.platform.channel.send = real_send
+    try:
+        linux.platform._heartbeat_tick()
+        assert linux.platform._heartbeat_stop.is_set()
+    finally:
+        # Restore even on assertion failure, before teardown sends its
+        # own exit\n.
+        linux.platform.channel.send = real_send
 
 
 def test_heartbeat_live_reconfigure(linux):

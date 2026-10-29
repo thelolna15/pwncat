@@ -546,9 +546,16 @@ class Session:
             self.platform.get_pty()
         except Exception:
             # This Session never finishes constructing and is never
-            # returned to a caller, so nothing else can clean up the
-            # platform's channel/background threads (e.g. a keepalive
-            # heartbeat) -- do it here before propagating.
+            # returned to a caller, but it's already registered as
+            # manager.sessions[self.id] (and possibly manager.target)
+            # above -- undo that so nothing else (e.g. Manager's own
+            # cleanup) later touches a Session missing self.hash, which
+            # self.target and anything using it needs. Nothing else can
+            # reach the platform to stop its background threads (e.g. a
+            # keepalive heartbeat) either, so do that here too.
+            self.manager.sessions.pop(self.id, None)
+            if self.manager.target is self:
+                self.manager.target = None
             try:
                 self.platform.exit()
             except Exception:
